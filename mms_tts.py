@@ -8,7 +8,7 @@ from torch import nn
 import soundfile as sf
 
 MAX_LENGTH = 200
-MODEL_DIR = "/home/pi/Repo/rknn_model_zoo/examples/mms_tts/ru"
+MODEL_DIR = "models/mms-tts/"
 ENCODER = "mms_tts_eng_encoder_200.rknn"
 DECODER = "mms_tts_eng_decoder_200.rknn"
 
