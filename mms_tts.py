@@ -6,6 +6,7 @@ import sounddevice as sd
 import torch
 from torch import nn
 import soundfile as sf
+from scipy import signal
 
 MAX_LENGTH = 200
 MODEL_DIR = "models/mms-tts/"
@@ -89,6 +90,33 @@ def middle_process(log_duration, input_padding_mask, max_length):
     output_padding_mask = output_padding_mask.numpy()
     
     return attn, output_padding_mask, predicted_lengths_max_real
+
+def play_audio_resample(waveform, samplerate=16000):
+    # Целевая частота — 48000 Гц (поддерживается RT5616)
+    target_sr = 44100
+
+    # Если частота уже правильная — просто играем
+    if samplerate == target_sr:
+        sd.play(waveform, samplerate=target_sr, device=0)
+        sd.wait()
+        return
+
+    # Иначе — ресэмплируем
+    print(f"🔄 Ресэмплинг с {samplerate} Гц → {target_sr} Гц...")
+
+    # Вычисляем коэффициент ресэмплинга
+    ratio = target_sr / samplerate
+    num_samples = int(len(waveform) * ratio)
+
+    # Ресэмплинг с помощью scipy
+    waveform_resampled = signal.resample(waveform, num_samples)
+
+    # Убедимся, что значения в диапазоне [-1, 1]
+    waveform_resampled = np.clip(waveform_resampled, -1.0, 1.0)
+
+    # Воспроизводим
+    sd.play(waveform_resampled, samplerate=target_sr, device=0)
+    sd.wait()
 
 def play_audio(waveform, samplerate=16000):
     """
