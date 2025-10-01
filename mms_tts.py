@@ -93,7 +93,7 @@ def middle_process(log_duration, input_padding_mask, max_length):
 
 def play_audio_resample(waveform, samplerate=16000):
     # Целевая частота — 48000 Гц (поддерживается RT5616)
-    target_sr = 44100
+    target_sr = 48000
 
     # Если частота уже правильная — просто играем
     if samplerate == target_sr:
@@ -115,26 +115,25 @@ def play_audio_resample(waveform, samplerate=16000):
     waveform_resampled = np.clip(waveform_resampled, -1.0, 1.0)
 
     # Воспроизводим
-    sd.play(waveform_resampled, samplerate=target_sr, device=0)
+    sd.play(waveform_resampled, samplerate=target_sr, device=2)
     sd.wait()
 
+import time
+
 def play_audio(waveform, samplerate=16000):
-    """
-    Проигрывает аудио из numpy-массива через наушники.
-    
-    waveform: numpy.ndarray формы (n_samples,) или (n_samples, channels)
-    samplerate: частота дискретизации (например, 16000)
-    """
-    # Нормализуем аудио в диапазон [-1, 1] (если не нормализовано)
     waveform = np.asarray(waveform, dtype=np.float32)
     if np.max(np.abs(waveform)) > 1.0:
         waveform = waveform / np.max(np.abs(waveform))
 
-    print("🔊 Проигрывание аудио...")
-    print(waveform.shape, max(waveform), waveform.mean())
-    sd.play(waveform, samplerate=samplerate, device=0)
-    sd.wait()  # Ждём окончания проигрывания
-    print("✅ Проигрывание завершено.")
+    duration_sec = len(waveform) / samplerate  # ← ВЫЧИСЛЯЕМ ДЛИТЕЛЬНОСТЬ
+    print(f"🔊 Проигрывание аудио... (длина: {len(waveform)} сэмплов, ~{duration_sec:.3f}с)")
+
+    sd.play(waveform, samplerate=samplerate, device=2)
+    sd.wait()  # ← Ждём, пока буфер освободится (это всё ещё нужно)
+    
+    # ✅ А ТЕПЕРЬ — ЖДЁМ РЕАЛЬНОЕ ВРЕМЯ ПРОИГРЫВАНИЯ
+    #time.sleep(duration_sec + 0.1)  # +0.1с — на погрешность драйвера
+    print(f"✅ Звук реально проигран ({duration_sec:.3f}с)")
 
 class TTSVocaliser:
     def __init__(self):
@@ -149,7 +148,7 @@ class TTSVocaliser:
         ret = model.init_runtime(target="rk3588", device_id=None)
         return model
     
-    def vocalise(self, inp: str):
+    def synthesize(self, inp: str):
         input_ids_array, attention_mask_array = preprocess_input(inp, vocab, max_length=MAX_LENGTH)
 
         # Encode
@@ -164,6 +163,10 @@ class TTSVocaliser:
         #sf.write(file=audio_save_path, data=np.array(waveform[0][:predicted_lengths_max_real * 256]), samplerate=16000)
     
         audio_data=np.array(waveform[0][:predicted_lengths_max_real * 256])
+        return audio_data
+        
+    def vocalise(self, inp: str):
+        audio_data = self.synthesize(inp)
         play_audio(audio_data)
 
 

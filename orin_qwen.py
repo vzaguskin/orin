@@ -139,7 +139,7 @@ async def audio_player():
 
             print(f"🎧 [PLAYER] Начинаю проигрывание фрагмента длиной {len(audio_data)} сэмплов")
             start_play = time.time()
-            play_audio_resample(audio_data)
+            await asyncio.to_thread(play_audio_resample, audio_data)
             duration_sec = len(audio_data) / 16000
             end_play = time.time()
 
@@ -170,10 +170,12 @@ async def audio_synthesizer():
                 await audio_buffer.put(None)
                 break
 
-            print(f"📝 [SYNTHESIZER] Получил текст: '{text}'")
+            print(f"📝 [SYNTHESIZER] Получил текст: '{text}'", flush=True)
             audio_data = tts_vocaliser.synthesize(text)
-            print(f"🎵 [SYNTHESIZER] Синтезировал: {len(audio_data)} сэмплов → кладу в буфер")
-            await audio_buffer.put(audio_data)
+            print(f"🎵 [SYNTHESIZER] Синтезировал: {len(audio_data)} сэмплов → кладу в буфер", flush=True)
+            #await audio_buffer.put(audio_data)
+            audio_buffer.put_nowait(audio_data)
+            print(f"🎵 [SYNTHESIZER] Положил в буффер, жду текста", flush=True)
 
             # 👇 Уменьшаем счётчик ожидаемых фрагментов — один синтезирован и положен
             #async with audio_count_lock:
