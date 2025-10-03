@@ -253,7 +253,7 @@ class RKLLM(object):
         self.set_function_tools_.argtypes = [RKLLM_Handle_t, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
         self.set_function_tools_.restype = ctypes.c_int
         
-        system_prompt = "<|im_start|>system Ты дружелюбный ассистент по имени Орин. Отвечай только русскими буквами без цифр и эмоджи например не 15 а пятнадцать. Отвечай коротко, без размышлений <|im_end|>"
+        system_prompt = "<|im_start|>system Ты дружелюбный ассистент по имени Орин. Отвечай коротко, без размышлений. Пиши простым текстом без форматирования и без markdown. <|im_end|>"
         prompt_prefix = "<|im_start|>user"
         prompt_postfix = "<|im_end|><|im_start|>assistant"
         self.set_chat_template(self.handle, ctypes.c_char_p(system_prompt.encode('utf-8')), ctypes.c_char_p(prompt_prefix.encode('utf-8')), ctypes.c_char_p(prompt_postfix.encode('utf-8')))
