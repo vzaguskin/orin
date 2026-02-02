@@ -7,30 +7,16 @@ from trans_map import trans_map
 
 # Спецсимволы → произношение
 SPECIAL_CHARS = {
-    '+': ' плюс ',
-    '-': ' минус ',
-    '*': ' умножить на ',
-    '/': ' разделить на ',
-    '&': ' и ',
-    '@': ' собака ',
-    '$': ' доллар ',
-    '#': ' решётка ',
-    '%': ' процент ',
-    '=': ' равно ',
-    '<': ' меньше ',
-    '>': ' больше ',
-    '^': ' в степени ',
-    '~': ' примерно ',
-    '|': ' или ',
-    '\\': ' обратный слэш ',
-    '`': ' гравис ',
-    '"': ' кавычки ',
-    "'": ' апостроф ',
-    '(': ' скобка открывается ',
-    ')': ' скобка закрывается ',
+    '+': ' плюс ', '-': ' минус ', '*': ' умножить на ', '/': ' разделить на ',
+    '&': ' и ', '@': ' собака ', '$': ' доллар ', '#': ' решётка ', '%': ' процент ',
+    '=': ' равно ', '<': ' меньше ', '>': ' больше ', '^': ' в степени ',
+    '~': ' примерно ', '|': ' или ', '\\': ' обратный слэш ', '`': ' гравис ',
+    '"': ' кавычки ', "'": ' апостроф ', '(': ' скобка открывается ',
+    ')': ' скобка закрывается ', '≈': ' примерно равно ', '–': ' тире ', '—': ' длинное тире ',
+    '€': ' евро ', '£': ' фунт ', '¥': ' иена ', '®': ' зарегистрировано ', '©': ' копирайт ',
 }
 
-# Транслит латинских букв (для аббревиатур и неизвестных слов)
+# Транслит латинских букв
 LATIN_TO_RU = {
     'a': 'эй', 'b': 'би', 'c': 'си', 'd': 'ди', 'e': 'и', 'f': 'эф',
     'g': 'джи', 'h': 'эйч', 'i': 'ай', 'j': 'джей', 'k': 'кей',
@@ -42,129 +28,230 @@ LATIN_TO_RU = {
 class StreamTextProcessor:
     def __init__(self, max_chunk_size: int = 200):
         self.max_chunk_size = max_chunk_size
-        self.clean_buffer = ""  # Только текст вне тегов
+        self.clean_buffer = ""
         self.inside_tag = False
+
+    def _is_allowed_char(self, char: str) -> bool:
+        """
+        Проверяет, разрешён ли символ для TTS.
+        Разрешаем: кириллицу (включая ё/Ё), латиницу, цифры, пробелы,
+        знаки препинания и спецсимволы из маппинга.
+        """
+        if char.isspace():
+            return True
+        if char in SPECIAL_CHARS:
+            return True
+        if char in '.!?,;:':
+            return True
+        # Кириллица: явная проверка всех букв включая ё/Ё
+        if char in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ':
+            return True
+        # Латиница
+        if 'a' <= char <= 'z' or 'A' <= char <= 'Z':
+            return True
+        if char.isdigit():
+            return True
+        return False
 
     def feed(self, char: str) -> List[str]:
         if not char:
             return []
 
-        # === 1. Удаление тегов в реальном времени ===
+        # === 1. Фильтрация тегов ===
         if char == '<':
             self.inside_tag = True
+            return []
         elif char == '>' and self.inside_tag:
             self.inside_tag = False
-            return []  # тег завершён — ничего не добавляем
+            return []
         elif self.inside_tag:
-            return []  # внутри тега — игнорируем символ
-        else:
-            # Вне тега — добавляем символ
-            self.clean_buffer += char
+            return []
 
-        # === 2. Полное преобразование буфера ===
-        processed = self._transform(self.clean_buffer)
+        # === 2. Фильтрация "мусора" для TTS (иероглифы, эмодзи, неизвестные символы) ===
+        if not self._is_allowed_char(char):
+            # Заменяем на пробел, чтобы не склеивать слова
+            char = ' '
+
+        # === 3. Добавление символа в буфер ===
+        self.clean_buffer += char
         fragments = []
 
-        # === 3. Проверка: есть ли завершённое предложение? ===
-        end_pos = self._find_safe_sentence_end(processed)
-        if end_pos is not None:
-            fragment = processed[:end_pos].strip()
-            if fragment:
-                fragments.append(fragment)
-            self.clean_buffer = ""
-            return fragments
+        # === 4. Отправка по завершённым предложениям (ТОЛЬКО .!? + пробел) ===
+        while True:
+            end_pos = self._find_safe_sentence_end_in_raw(self.clean_buffer)
+            if end_pos is None:
+                break
+            
+            raw_fragment = self.clean_buffer[:end_pos]
+            self.clean_buffer = self.clean_buffer[end_pos:]
+            
+            processed = self._transform(raw_fragment)
+            if processed.strip():
+                fragments.append(processed.strip())
 
-        # === 4. Аварийная отправка по длине (только если сильно превышен лимит) ===
-        if len(processed) >= self.max_chunk_size:
-            cutoff = self._find_safe_cutoff(processed, self.max_chunk_size)
-            fragment = processed[:cutoff].strip()
-            if fragment:
-                fragments.append(fragment)
-            # После отправки по длине — сбрасываем буфер (небольшая потеря контекста допустима)
-            self.clean_buffer = ""
+        # === 5. Аварийная отсечка по длине ===
+        if len(self.clean_buffer) > self.max_chunk_size * 2:
+            cutoff = self._find_safe_cutoff_in_raw(self.clean_buffer, self.max_chunk_size)
+            if cutoff > 0:
+                raw_fragment = self.clean_buffer[:cutoff]
+                self.clean_buffer = self.clean_buffer[cutoff:]
+                
+                processed = self._transform(raw_fragment)
+                if processed.strip():
+                    fragments.append(processed.strip())
 
         return fragments
+
+    def _find_safe_sentence_end_in_raw(self, text: str) -> Optional[int]:
+        """
+        Отправляем фрагмент ТОЛЬКО при: знак препинания (.!?) + пробел/перенос.
+        Это гарантирует целостность дробей и валют без сложных эвристик.
+        """
+        for i in range(len(text) - 1, -1, -1):
+            if text[i] in '.!?':
+                # Требуем пробел/перенос СРАЗУ после знака препинания
+                if i + 1 < len(text) and text[i + 1].isspace():
+                    return i + 1  # включаем знак препинания, но не пробел
+        return None
+
+    def _find_safe_cutoff_in_raw(self, text: str, max_len: int) -> int:
+        """Безопасная отсечка по пробелам/знакам препинания"""
+        if len(text) <= max_len:
+            return len(text)
+        
+        for i in range(min(max_len, len(text)) - 1, -1, -1):
+            if text[i].isspace() or text[i] in '.!?,;:':
+                return i + 1
+        
+        return max_len
 
     def _transform(self, text: str) -> str:
         if not text:
             return text
 
-        # Спецсимволы
+        # 1. Спецсимволы
         for char, repl in SPECIAL_CHARS.items():
             text = text.replace(char, repl)
 
-        # Числа → слова
+        # 2. Денежные суммы с дробями: $19.99 → "девятнадцать долларов девяносто девять центов"
+        def replace_currency(match):
+            currency = match.group(1)
+            whole = match.group(2)
+            frac = match.group(3)
+            try:
+                w_num = int(whole)
+                w = num2words(w_num, lang='ru')
+                f = num2words(int(frac), lang='ru')
+                curr_map = {'$': 'доллар', '€': 'евро', '£': 'фунт'}
+                curr_word = curr_map.get(currency, 'валюта')
+                
+                # Склонение валюты
+                if w_num % 10 == 1 and w_num % 100 != 11:
+                    curr_form = curr_word  # 1 доллар
+                elif 2 <= w_num % 10 <= 4 and not (12 <= w_num % 100 <= 14):
+                    curr_form = curr_word + 'а'  # 2-4 доллара
+                else:
+                    curr_form = curr_word + 'ов'  # 5+ долларов
+                
+                return f"{w} {curr_form} {f} центов"
+            except:
+                return match.group()
+        
+        text = re.sub(r'([\$€£])(\d+)\.(\d{2})', replace_currency, text)
+
+        # 3. Десятичные дроби: 2.0 → "два" (дробная часть 0 игнорируется для естественности)
+        def replace_decimal(match):
+            try:
+                num_str = match.group()
+                if '.' not in num_str:
+                    return num2words(int(num_str), lang='ru')
+                
+                whole_part, frac_part = num_str.split('.')
+                whole = int(whole_part)
+                frac = int(frac_part)
+                
+                # Особый случай: 2.0 → "два" (без "ноль десятых" — неестественно для речи)
+                if frac == 0:
+                    return num2words(whole, lang='ru')
+                
+                whole_word = num2words(whole, lang='ru')
+                frac_word = num2words(frac, lang='ru')
+                
+                # Название дробной части
+                frac_len = len(frac_part.lstrip('0') or '0')
+                if frac_len == 1:
+                    frac_name = 'десятых'
+                elif frac_len == 2:
+                    frac_name = 'сотых'
+                else:
+                    frac_name = 'тысячных'
+                
+                return f"{whole_word} целых {frac_word} {frac_name}"
+            except:
+                return match.group()
+        
+        text = re.sub(r'\b\d+\.\d+\b', replace_decimal, text)
+
+        # 4. Целые числа
         def replace_number(match):
             try:
                 num = int(match.group())
                 return num2words(num, lang='ru')
-            except (ValueError, OverflowError):
+            except:
                 return match.group()
         text = re.sub(r'\b\d+\b', replace_number, text)
 
-        # Латинские слова
+        # 5. Аббревиатуры (только ЗАГЛАВНЫЕ буквы, 2+ символов, опционально цифры)
+        def replace_abbreviation(match):
+            word = match.group()
+            letters = ''.join(ch for ch in word if ch.isalpha())
+            digits = ''.join(ch for ch in word if ch.isdigit())
+            
+            if not letters:
+                return word
+            
+            # Транслит по буквам
+            translit = ' '.join(LATIN_TO_RU.get(ch.lower(), ch) for ch in letters)
+            if digits:
+                try:
+                    digit_words = num2words(int(digits), lang='ru')
+                    return f"{translit} {digit_words}"
+                except:
+                    return f"{translit} {digits}"
+            return translit
+        
+        text = re.sub(r'\b([A-Z]{2,}[0-9]*)\b', replace_abbreviation, text)
+
+        # 6. Остальные латинские слова
         def replace_latin_word(match):
             word = match.group()
             lower_word = word.lower()
-
-            # Аббревиатура: все заглавные, только буквы, длина >=2
-            if len(word) >= 2 and word.isalpha() and word.isupper():
-                return ' '.join(LATIN_TO_RU.get(ch.lower(), ch) for ch in word)
-
-            # Есть в словаре?
+            
             if lower_word in trans_map:
                 return trans_map[lower_word]
+            
+            # Транслит по буквам, сохраняя только буквы
+            return ' '.join(
+                LATIN_TO_RU.get(ch.lower(), ch) 
+                for ch in word 
+                if ch.isalpha()
+            )
+        
+        text = re.sub(r'\b[a-zA-Z]+\b', replace_latin_word, text)
 
-            # Иначе — транслит по буквам
-            return ''.join(LATIN_TO_RU.get(ch.lower(), ch) for ch in word)
-
-        text = re.sub(r'\b[A-Za-z]+\b', replace_latin_word, text)
-
-        # Очистка лишних пробелов
+        # 7. Финальная очистка пробелов
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
-    def _find_safe_sentence_end(self, text: str) -> Optional[int]:
-        """
-        Ищет позицию ПОСЛЕ последнего завершённого предложения.
-        Завершённое = [.!?] за которым следует пробел/перенос/конец строки.
-        Возвращает индекс для среза (например, 10 → text[:10]).
-        """
-        # Идём с конца
-        for i in range(len(text) - 1, -1, -1):
-            if text[i] in '.!?':
-                # Если это конец строки — считаем завершённым (для flush)
-                if i == len(text) - 1:
-                    return len(text)
-                # Иначе проверяем следующий символ
-                next_char = text[i + 1]
-                if next_char in ' \n\t\r':
-                    return i + 1  # включаем точку, но не пробел
-        return None
-
-    def _find_safe_cutoff(self, text: str, max_len: int) -> int:
-        """Находит безопасную позицию для обрезки (не посередине слова)"""
-        if len(text) <= max_len:
-            return len(text)
-        # Ищем последний пробел до max_len
-        cutoff = max_len
-        while cutoff > 0 and not text[cutoff - 1].isspace():
-            cutoff -= 1
-        if cutoff == 0:
-            cutoff = max_len  # не нашли — режем по длине
-        return cutoff
-
     def flush(self) -> List[str]:
-        """Вызывается в конце потока — отправляем всё, что осталось"""
         if not self.clean_buffer:
             return []
+        
         processed = self._transform(self.clean_buffer)
-        # В flush разрешаем отправку даже без пробела после точки
         self.clean_buffer = ""
         result = processed.strip()
         return [result] if result else []
 
     def reset(self):
-        """Сброс состояния (для нового диалога)"""
         self.clean_buffer = ""
         self.inside_tag = False
