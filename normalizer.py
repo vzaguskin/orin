@@ -66,6 +66,8 @@ class StreamTextProcessor:
         self.prev_char_was_digit = False
         self.consecutive_digit_dashes = 0  # Счётчик дефисов между цифрами
 
+    # normalizer.py — заменить логику обработки тегов в методе feed():
+
     def feed(self, char):
         if not char:
             self.prev_char_was_digit = False
@@ -75,7 +77,7 @@ class StreamTextProcessor:
         # === 1. Обработка тегов: '<' ===
         if char == '<':
             self._flush_entity()
-            self.after_lt = True
+            self.after_lt = True  # Ждём следующий символ для принятия решения
             self.prev_char_was_digit = False
             self.consecutive_digit_dashes = 0
             return []
@@ -83,9 +85,12 @@ class StreamTextProcessor:
         # === 2. Контекст после '<' ===
         if self.after_lt:
             self.after_lt = False
-            # Тег начинается ТОЛЬКО если после '<' идёт буква
-            if char.isalpha():
-                self.inside_tag = True
+            # ТЕГ начинается ТОЛЬКО если после '<' идёт:
+            # - буква (для <b>, <think>)
+            # - слэш (для </b>, </think>)
+            # ЦИФРА после '<' = НЕ тег (арифметика: 5<10)
+            if char.isalpha() or char == '/':
+                self.inside_tag = True  # Игнорируем содержимое ДО '>'
                 self.prev_char_was_digit = False
                 self.consecutive_digit_dashes = 0
                 return []
@@ -94,25 +99,20 @@ class StreamTextProcessor:
                 self._add_to_buffer('меньше')
                 # Продолжаем обработку текущего символа ниже
         
-        # === 3. Обработка тегов: '>' ===
-        if char == '>':
-            if self.inside_tag:
+        # === 3. Игнорирование содержимого тега (<...>) ===
+        if self.inside_tag:
+            if char == '>':
+                # Завершение тега — сбрасываем флаг, НИЧЕГО не добавляем в вывод
                 self.inside_tag = False
                 self.prev_char_was_digit = False
                 self.consecutive_digit_dashes = 0
                 return []
-            else:
-                self._flush_entity()
-                self._add_to_buffer('больше')
-                self.prev_char_was_digit = False
-                self.consecutive_digit_dashes = 0
-                return self._emit_fragments_if_ready()
-        
-        # === 4. Игнорирование содержимого тегов ===
-        if self.inside_tag:
+            # Игнорируем ВСЁ внутри тега (включая буквы, цифры, слэши)
             self.prev_char_was_digit = False
             self.consecutive_digit_dashes = 0
             return []
+    
+    # ... остальная логика без изменений ...
         
         # === 5. Обработка дефиса (контекстная) ===
         if char == '-':
