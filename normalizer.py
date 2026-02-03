@@ -21,7 +21,7 @@ class StreamTextProcessor:
     # Словарь транслитерации латинских букв (базовый)
     LATIN_TO_RU = {
         'a': 'эй', 'b': 'би', 'c': 'си', 'd': 'ди', 'e': 'и', 'f': 'эф',
-        'g': 'джи', 'i': 'ай', 'j': 'джей', 'k': 'кей',
+        'g': 'джи', 'h': 'эйч', 'i': 'ай', 'j': 'джей', 'k': 'кей',
         'l': 'эль', 'm': 'эм', 'n': 'эн', 'o': 'оу', 'p': 'пи',
         'q': 'кью', 'r': 'ар', 's': 'эс', 't': 'ти', 'u': 'ю',
         'v': 'в', 'w': 'дабл-ю', 'x': 'икс', 'y': 'уай', 'z': 'зед',
@@ -66,8 +66,6 @@ class StreamTextProcessor:
         self.prev_char_was_digit = False
         self.consecutive_digit_dashes = 0  # Счётчик дефисов между цифрами
 
-    # normalizer.py — заменить логику обработки тегов в методе feed():
-
     def feed(self, char):
         if not char:
             self.prev_char_was_digit = False
@@ -111,8 +109,6 @@ class StreamTextProcessor:
             self.prev_char_was_digit = False
             self.consecutive_digit_dashes = 0
             return []
-    
-    # ... остальная логика без изменений ...
         
         # === 5. Обработка дефиса (контекстная) ===
         if char == '-':
@@ -238,10 +234,6 @@ class StreamTextProcessor:
             self._add_to_buffer('.')
         
         self.current_entity = ""
-
-    # normalizer.py (обновлённый метод _transform_entity + вспомогательные методы)
-
-# normalizer.py — добавить/заменить методы:
 
     def _transform_entity(self, entity):
         # === 1. Числа с точками ===

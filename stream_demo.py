@@ -26,7 +26,7 @@ def generate_max_stress_text() -> str:
     )
 
 def main():
-    processor = StreamTextProcessor(max_chunk_size=180)
+    processor = StreamTextProcessor(max_chunk_size=70)
     text = generate_max_stress_text()
     
     print("=" * 90)
@@ -57,6 +57,7 @@ def main():
             total_chars += len(frag)
             print(f"\n📤 ФРАГМЕНТ #{len(fragments):2d} | {len(frag):4d} симв. |")
             print(f"   «{frag}»")
+            print(f"Прочитано {int(100 * i / len(text))}% текста")
     
     # Финальный flush
     print("\n" + "-" * 90)
@@ -100,7 +101,7 @@ def main():
     checks = [
         ("Дроби целы", "3.14" not in all_text and "19.99" not in all_text, "дроби не разорваны"),
         ("Валюты целы", "$" not in all_text and "€" not in all_text and "£" not in all_text, "валюты обработаны"),
-        ("Аббревиатуры", "эйч ти эм эль" in all_text and "си эс эс" in all_text, "HTML5/CSS3 расшифрованы"),
+        ("Аббревиатуры", "аш ти эм эль" in all_text and "си эс эс" in all_text, "HTML5/CSS3 расшифрованы"),
         ("Математика", "плюс" in all_text and "умножить" in all_text and "степени" in all_text, "операторы расширены"),
         ("Иероглифы", "北京" not in all_text and "办公室" not in all_text, "иероглифы удалены"),
         ("Эмодзи", "😊" not in all_text and "🚀" not in all_text, "эмодзи удалены"),
