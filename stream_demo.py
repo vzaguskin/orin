@@ -76,8 +76,21 @@ def main():
     print("=" * 90)
     print(f"Всего фрагментов:       {len(fragments)}")
     print(f"Общая длина фрагментов: {total_chars} символов")
-    print(f"Буфер после flush:      '{processor.clean_buffer}' (пустой: {processor.clean_buffer == ''})")
-    print(f"Потеря данных:          {'НЕТ' if processor.clean_buffer == '' else 'ЕСТЬ'}")
+    # Вместо этого — проверка через публичный интерфейс:
+    print("-" * 90)
+    print("FLUSH — отправка остатка буфера:")
+    print("-" * 90)
+    final_fragments = processor.flush()
+
+    for i, frag in enumerate(final_fragments, 1):
+        print(f"\n📤 ФИНАЛ #{i:2d} | {len(frag):4d} симв. |")
+        print(f"   «{frag}»")
+
+    print("\n" + "=" * 90)
+    print("ИТОГОВАЯ СТАТИСТИКА:")
+    print("=" * 90)
+    print(f"Всего фрагментов:       {len(fragments) + len(final_fragments)}")
+    print(f"Общая длина фрагментов: {total_chars + sum(len(f) for f in final_fragments)} символов")
     print("=" * 90)
     
     # Анализ проблемных мест

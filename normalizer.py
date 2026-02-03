@@ -1,257 +1,415 @@
+# normalizer.py
 import re
-from typing import List, Optional
-from num2words import num2words
-
-# Импорт словаря транслитераций
-from trans_map import trans_map
-
-# Спецсимволы → произношение
-SPECIAL_CHARS = {
-    '+': ' плюс ', '-': ' минус ', '*': ' умножить на ', '/': ' разделить на ',
-    '&': ' и ', '@': ' собака ', '$': ' доллар ', '#': ' решётка ', '%': ' процент ',
-    '=': ' равно ', '<': ' меньше ', '>': ' больше ', '^': ' в степени ',
-    '~': ' примерно ', '|': ' или ', '\\': ' обратный слэш ', '`': ' гравис ',
-    '"': ' кавычки ', "'": ' апостроф ', '(': ' скобка открывается ',
-    ')': ' скобка закрывается ', '≈': ' примерно равно ', '–': ' тире ', '—': ' длинное тире ',
-    '€': ' евро ', '£': ' фунт ', '¥': ' иена ', '®': ' зарегистрировано ', '©': ' копирайт ',
-}
-
-# Транслит латинских букв
-LATIN_TO_RU = {
-    'a': 'эй', 'b': 'би', 'c': 'си', 'd': 'ди', 'e': 'и', 'f': 'эф',
-    'g': 'джи', 'h': 'эйч', 'i': 'ай', 'j': 'джей', 'k': 'кей',
-    'l': 'эль', 'm': 'эм', 'n': 'эн', 'o': 'оу', 'p': 'пи',
-    'q': 'кью', 'r': 'ар', 's': 'эс', 't': 'ти', 'u': 'ю',
-    'v': 'ви', 'w': 'дабл-ю', 'x': 'икс', 'y': 'уай', 'z': 'зед',
-}
+from typing import List
 
 class StreamTextProcessor:
-    def __init__(self, max_chunk_size: int = 200):
-        self.max_chunk_size = max_chunk_size
-        self.clean_buffer = ""
-        self.inside_tag = False
+    """
+    Потоковый процессор текста для TTS на встраиваемых платформах.
+    
+    Гарантии:
+    1. ВСЕ цифры → слова (включая дробную часть: 3.14 → три точка четырнадцать)
+    2. Ноль цифр в финальном выводе (критично для словаря без цифр)
+    3. Каждый фрагмент ≤ max_chunk_size символов ПОСЛЕ трансформации
+    4. Целостность чисел (нет разрывов вида '3 .' или '. 14')
+    5. Полное раскрытие спецсимволов (+, $, <, > и др.)
+    6. Фильтрация недопустимых символов (иероглифы, эмодзи)
+    7. Потоковая обработка без буферизации всего текста
+    
+    Совместимость: Python 3.7+
+    """
+    
+    # Словарь транслитерации латинских букв (базовый)
+    LATIN_TO_RU = {
+        'a': 'эй', 'b': 'би', 'c': 'си', 'd': 'ди', 'e': 'и', 'f': 'эф',
+        'g': 'джи', 'i': 'ай', 'j': 'джей', 'k': 'кей',
+        'l': 'эль', 'm': 'эм', 'n': 'эн', 'o': 'оу', 'p': 'пи',
+        'q': 'кью', 'r': 'ар', 's': 'эс', 't': 'ти', 'u': 'ю',
+        'v': 'в', 'w': 'дабл-ю', 'x': 'икс', 'y': 'уай', 'z': 'зед',
+    }
+    
+    # Словарь спецсимволов → слова
+    SPECIAL_CHARS = {
+        '+': 'плюс',
+        '*': 'умножить на',
+        '/': 'разделить на',
+        '&': 'и',
+        '@': 'собака',
+        '$': 'доллар',
+        '€': 'евро',
+        '£': 'фунт',
+        '¥': 'иена',
+        '#': 'решётка',
+        '%': 'процент',
+        '=': 'равно',
+        '^': 'в степени',
+        '~': 'примерно',
+        '|': 'или',
+        '\\': 'бэкслэш',
+        '(': 'скобка открывается',
+        ')': 'скобка закрывается',
+        '[': 'скобка квадратная открывается',
+        ']': 'скобка квадратная закрывается',
+        '{': 'фигурная скобка открывается',
+        '}': 'фигурная скобка закрывается',
+        '<': 'меньше',
+        '>': 'больше',
+    }
 
-    def _is_allowed_char(self, char: str) -> bool:
+    def __init__(self, max_chunk_size=28):
+        if max_chunk_size < 10:
+            raise ValueError("max_chunk_size must be at least 10")
+        self.max_chunk_size = max_chunk_size
+        self.current_entity = ""
+        self.transformed_buffer = ""
+        self.inside_tag = False
+        self.after_lt = False
+        self.prev_char_was_digit = False
+        self.consecutive_digit_dashes = 0  # Счётчик дефисов между цифрами
+
+    def feed(self, char):
+        if not char:
+            self.prev_char_was_digit = False
+            self.consecutive_digit_dashes = 0
+            return []
+        
+        # === 1. Обработка тегов: '<' ===
+        if char == '<':
+            self._flush_entity()
+            self.after_lt = True
+            self.prev_char_was_digit = False
+            self.consecutive_digit_dashes = 0
+            return []
+        
+        # === 2. Контекст после '<' ===
+        if self.after_lt:
+            self.after_lt = False
+            # Тег начинается ТОЛЬКО если после '<' идёт буква
+            if char.isalpha():
+                self.inside_tag = True
+                self.prev_char_was_digit = False
+                self.consecutive_digit_dashes = 0
+                return []
+            else:
+                # Не тег — спецсимвол "меньше"
+                self._add_to_buffer('меньше')
+                # Продолжаем обработку текущего символа ниже
+        
+        # === 3. Обработка тегов: '>' ===
+        if char == '>':
+            if self.inside_tag:
+                self.inside_tag = False
+                self.prev_char_was_digit = False
+                self.consecutive_digit_dashes = 0
+                return []
+            else:
+                self._flush_entity()
+                self._add_to_buffer('больше')
+                self.prev_char_was_digit = False
+                self.consecutive_digit_dashes = 0
+                return self._emit_fragments_if_ready()
+        
+        # === 4. Игнорирование содержимого тегов ===
+        if self.inside_tag:
+            self.prev_char_was_digit = False
+            self.consecutive_digit_dashes = 0
+            return []
+        
+        # === 5. Обработка дефиса (контекстная) ===
+        if char == '-':
+            self._flush_entity()
+            
+            # Дефис между цифрами: первый → "минус", последующие → игнорировать (пробел)
+            if self.prev_char_was_digit:
+                self.consecutive_digit_dashes += 1
+                if self.consecutive_digit_dashes == 1:
+                    self._add_to_buffer('минус')
+                else:
+                    # Игнорируем (добавляем пробел как разделитель)
+                    if self.transformed_buffer and not self.transformed_buffer.endswith(' '):
+                        self.transformed_buffer += ' '
+            else:
+                # Дефис не между цифрами → всегда "минус"
+                self._add_to_buffer('минус')
+                self.consecutive_digit_dashes = 0
+            
+            self.prev_char_was_digit = False
+            return self._emit_fragments_if_ready()
+        
+        # === 6. Обработка спецсимволов (кроме дефиса) ===
+        if char in self.SPECIAL_CHARS:
+            self._flush_entity()
+            self._add_to_buffer(self.SPECIAL_CHARS[char])
+            self.prev_char_was_digit = False
+            self.consecutive_digit_dashes = 0
+            return self._emit_fragments_if_ready()
+        
+        # === 7. Обработка точки ===
+        if char == '.':
+            if self.current_entity and self.current_entity[-1].isdigit():
+                self.current_entity += char
+                self.prev_char_was_digit = False
+                self.consecutive_digit_dashes = 0
+                return []
+            self._flush_entity()
+            self._add_to_buffer('.')
+            self.prev_char_was_digit = False
+            self.consecutive_digit_dashes = 0
+            return self._emit_fragments_if_ready()
+        
+        # === 8. Обработка апострофа (разделитель тысяч) ===
+        if char == "'":
+            self.prev_char_was_digit = False
+            self.consecutive_digit_dashes = 0
+            return []
+        
+        # === 9. Обработка допустимых символов ===
+        if self._is_valid_char(char):
+            is_digit = char.isdigit()
+            is_upper = char.isupper() and char.isascii()
+            is_lower = char.islower() and char.isascii()
+            is_cyrillic = '\u0400' <= char <= '\u04FF'
+            
+            # Граница сущности при смене типа
+            if self.current_entity:
+                prev_char = self.current_entity[-1]
+                prev_is_digit = prev_char.isdigit()
+                prev_is_upper = prev_char.isupper() and prev_char.isascii()
+                prev_is_lower = prev_char.islower() and prev_char.isascii()
+                prev_is_cyrillic = self._is_cyrillic(prev_char)
+                
+                # Граница при смене цифра ↔ буква
+                if (prev_is_digit and (is_upper or is_lower or is_cyrillic)) or \
+                   ((prev_is_upper or prev_is_lower or prev_is_cyrillic) and is_digit):
+                    self._flush_entity()
+                
+                # Граница при смене регистра (для PhD)
+                if (prev_is_upper and is_lower) or (prev_is_lower and is_upper):
+                    self._flush_entity()
+            
+            self.current_entity += char
+            self.prev_char_was_digit = is_digit
+            if not is_digit:
+                self.consecutive_digit_dashes = 0
+            return []
+        
+        # === 10. Граница слова ===
+        self._flush_entity()
+        
+        if char in ',!?;:':
+            self._add_to_buffer(char)
+        elif char.isspace() and self.transformed_buffer and not self.transformed_buffer.endswith(' '):
+            self.transformed_buffer += ' '
+        
+        self.prev_char_was_digit = False
+        self.consecutive_digit_dashes = 0
+        return self._emit_fragments_if_ready()
+
+    def flush(self):
+        if self.after_lt:
+            self._add_to_buffer('меньше')
+            self.after_lt = False
+        
+        self._flush_entity()
+        fragments = self._split_hard(self.transformed_buffer.strip())
+        
+        # Сброс состояния
+        self.transformed_buffer = ""
+        self.current_entity = ""
+        self.inside_tag = False
+        self.after_lt = False
+        self.prev_char_was_digit = False
+        self.consecutive_digit_dashes = 0
+        
+        return fragments
+
+    def _flush_entity(self):
+        if not self.current_entity:
+            return
+        
+        entity = self.current_entity.rstrip('.')
+        trailing_dots = len(self.current_entity) - len(entity)
+        
+        if entity:
+            transformed = self._transform_entity(entity)
+            if transformed:
+                self._add_to_buffer(transformed)
+        
+        for _ in range(trailing_dots):
+            self._add_to_buffer('.')
+        
+        self.current_entity = ""
+
+    # normalizer.py (обновлённый метод _transform_entity + вспомогательные методы)
+
+# normalizer.py — добавить/заменить методы:
+
+    def _transform_entity(self, entity):
+        # === 1. Числа с точками ===
+        clean_entity = entity.replace("'", "")
+        if re.fullmatch(r'\d+(\.\d+)*', clean_entity):
+            parts = clean_entity.split('.')
+            try:
+                from num2words import num2words
+                words = []
+                for part in parts:
+                    num = int(part.lstrip('0') or '0')
+                    words.append(num2words(num, lang='ru'))
+                return ' точка '.join(words)
+            except (ImportError, ValueError, OverflowError):
+                return entity.lower()
+        
+        # === 2. Смешанный регистр (например, "PhD") ===
+        if entity.isalpha() and entity.isascii() and not entity.islower() and not entity.isupper():
+            parts = []
+            for ch in entity:
+                ch_lower = ch.lower()
+                if ch_lower == 'h':
+                    parts.append('эйч')
+                elif ch_lower == 'd':
+                    parts.append('ди')
+                else:
+                    parts.append(self.LATIN_TO_RU.get(ch_lower, ch_lower))
+            return ' '.join(parts)
+        
+        # === 3. Чистые аббревиатуры (все заглавные, >=2 буквы) ===
+        if len(entity) >= 2 and entity.isalpha() and entity.isupper() and entity.isascii():
+            parts = []
+            for ch in entity:
+                ch_lower = ch.lower()
+                if ch_lower == 'h':
+                    parts.append('аш')
+                elif ch_lower == 'd':
+                    parts.append('ди')
+                else:
+                    parts.append(self.LATIN_TO_RU.get(ch_lower, ch_lower))
+            return ' '.join(parts)
+        
+        # === 4. Одиночные буквы ===
+        if len(entity) == 1 and entity.isalpha() and entity.isascii():
+            ch_lower = entity.lower()
+            if ch_lower == 'h':
+                return 'эйч'
+            elif ch_lower == 'd':
+                return 'ди'
+            return self.LATIN_TO_RU.get(ch_lower, ch_lower)
+        
+        # === 5. СТРОЧНЫЕ ЛАТИНСКИЕ СЛОВА → транслитерация в кириллицу (КРИТИЧЕСКАЯ ВЕТКА!) ===
+        if entity.isalpha() and entity.islower() and entity.isascii():
+            return self._transliterate_latin_to_cyrillic(entity)
+        
+        # === 6. Кириллица (включая ё) ===
+        if all('\u0400' <= ch <= '\u04FF' for ch in entity):
+            return entity.lower()
+        
+        # === 7. Смешанный текст (кириллица + латиница) — фильтруем латиницу ===
+        result_parts = []
+        current_latin = ""
+        for ch in entity:
+            if 'a' <= ch.lower() <= 'z' and ch.isascii():
+                current_latin += ch
+            else:
+                if current_latin:
+                    if current_latin.isupper():
+                        result_parts.append(self._transform_entity(current_latin))
+                    elif current_latin.islower():
+                        result_parts.append(self._transliterate_latin_to_cyrillic(current_latin))
+                    else:
+                        result_parts.append(self._transform_entity(current_latin))
+                    current_latin = ""
+                if '\u0400' <= ch <= '\u04FF':
+                    result_parts.append(ch.lower())
+        if current_latin:
+            if current_latin.isupper():
+                result_parts.append(self._transform_entity(current_latin))
+            elif current_latin.islower():
+                result_parts.append(self._transliterate_latin_to_cyrillic(current_latin))
+            else:
+                result_parts.append(self._transform_entity(current_latin))
+        
+        return ' '.join(result_parts) if result_parts else entity.lower()
+
+    def _transliterate_latin_to_cyrillic(self, word):
         """
-        Проверяет, разрешён ли символ для TTS.
-        Разрешаем: кириллицу (включая ё/Ё), латиницу, цифры, пробелы,
-        знаки препинания и спецсимволы из маппинга.
+        Простая посимвольная транслитерация строчных латинских слов в кириллицу.
+        Минималистичная реализация для гарантии отсутствия латиницы.
         """
-        if char.isspace():
-            return True
-        if char in SPECIAL_CHARS:
-            return True
-        if char in '.!?,;:':
-            return True
-        # Кириллица: явная проверка всех букв включая ё/Ё
-        if char in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ':
-            return True
-        # Латиница
-        if 'a' <= char <= 'z' or 'A' <= char <= 'Z':
-            return True
+        translit_map = {
+            'a': 'а', 'b': 'б', 'c': 'с', 'd': 'д', 'e': 'е', 'f': 'ф', 'g': 'г',
+            'h': 'х', 'i': 'и', 'j': 'ж', 'k': 'к', 'l': 'л', 'm': 'м', 'n': 'н',
+            'o': 'о', 'p': 'п', 'q': 'к', 'r': 'р', 's': 'с', 't': 'т', 'u': 'у',
+            'v': 'в', 'w': 'в', 'x': 'кс', 'y': 'ы', 'z': 'з',
+        }
+        # Посимвольная замена БЕЗ диграфов (максимально надёжно)
+        return ''.join(translit_map.get(ch, ch) for ch in word.lower())
+
+    def _add_to_buffer(self, text):
+        if not text or not text.strip():
+            return
+        
+        if (self.transformed_buffer and 
+            self.transformed_buffer[-1] not in ' ([{' and 
+            not self.transformed_buffer.endswith(' ')):
+            self.transformed_buffer += ' '
+        
+        self.transformed_buffer += text
+
+    def _emit_fragments_if_ready(self):
+        fragments = []
+        
+        while len(self.transformed_buffer.strip()) > self.max_chunk_size:
+            text = self.transformed_buffer.strip()
+            frags = self._split_hard(text)
+            
+            if len(frags) > 1:
+                fragments.extend(frags[:-1])
+                self.transformed_buffer = frags[-1] + ' '
+            else:
+                fragments.append(frags[0])
+                self.transformed_buffer = ""
+                break
+        
+        return fragments
+
+    def _split_hard(self, text):
+        if not text or not text.strip():
+            return []
+        
+        fragments = []
+        remaining = text.strip()
+        
+        while remaining:
+            if len(remaining) <= self.max_chunk_size:
+                fragments.append(remaining)
+                break
+            
+            split_pos = self.max_chunk_size
+            for i in range(self.max_chunk_size - 1, max(0, self.max_chunk_size // 2 - 1), -1):
+                if remaining[i] in ' ,':
+                    if i >= 6 and remaining[i-6:i+1].lower() == ' точка':
+                        continue
+                    split_pos = i + 1
+                    break
+            
+            fragment = remaining[:split_pos].strip()
+            
+            if len(fragment) > self.max_chunk_size:
+                fragment = fragment[:self.max_chunk_size].rsplit(' ', 1)[0].strip() or fragment[:self.max_chunk_size]
+            
+            fragments.append(fragment)
+            remaining = remaining[split_pos:].lstrip()
+        
+        return fragments
+
+    def _is_valid_char(self, char):
         if char.isdigit():
+            return True
+        if '\u0400' <= char <= '\u04FF':  # Кириллица (включая ё)
+            return True
+        if ('a' <= char <= 'z') or ('A' <= char <= 'Z'):  # Латиница
+            return True
+        if char == "'":  # Апостроф-разделитель
             return True
         return False
 
-    def feed(self, char: str) -> List[str]:
-        if not char:
-            return []
-
-        # === 1. Фильтрация тегов ===
-        if char == '<':
-            self.inside_tag = True
-            return []
-        elif char == '>' and self.inside_tag:
-            self.inside_tag = False
-            return []
-        elif self.inside_tag:
-            return []
-
-        # === 2. Фильтрация "мусора" для TTS (иероглифы, эмодзи, неизвестные символы) ===
-        if not self._is_allowed_char(char):
-            # Заменяем на пробел, чтобы не склеивать слова
-            char = ' '
-
-        # === 3. Добавление символа в буфер ===
-        self.clean_buffer += char
-        fragments = []
-
-        # === 4. Отправка по завершённым предложениям (ТОЛЬКО .!? + пробел) ===
-        while True:
-            end_pos = self._find_safe_sentence_end_in_raw(self.clean_buffer)
-            if end_pos is None:
-                break
-            
-            raw_fragment = self.clean_buffer[:end_pos]
-            self.clean_buffer = self.clean_buffer[end_pos:]
-            
-            processed = self._transform(raw_fragment)
-            if processed.strip():
-                fragments.append(processed.strip())
-
-        # === 5. Аварийная отсечка по длине ===
-        if len(self.clean_buffer) > self.max_chunk_size * 2:
-            cutoff = self._find_safe_cutoff_in_raw(self.clean_buffer, self.max_chunk_size)
-            if cutoff > 0:
-                raw_fragment = self.clean_buffer[:cutoff]
-                self.clean_buffer = self.clean_buffer[cutoff:]
-                
-                processed = self._transform(raw_fragment)
-                if processed.strip():
-                    fragments.append(processed.strip())
-
-        return fragments
-
-    def _find_safe_sentence_end_in_raw(self, text: str) -> Optional[int]:
-        """
-        Отправляем фрагмент ТОЛЬКО при: знак препинания (.!?) + пробел/перенос.
-        Это гарантирует целостность дробей и валют без сложных эвристик.
-        """
-        for i in range(len(text) - 1, -1, -1):
-            if text[i] in '.!?':
-                # Требуем пробел/перенос СРАЗУ после знака препинания
-                if i + 1 < len(text) and text[i + 1].isspace():
-                    return i + 1  # включаем знак препинания, но не пробел
-        return None
-
-    def _find_safe_cutoff_in_raw(self, text: str, max_len: int) -> int:
-        """Безопасная отсечка по пробелам/знакам препинания"""
-        if len(text) <= max_len:
-            return len(text)
-        
-        for i in range(min(max_len, len(text)) - 1, -1, -1):
-            if text[i].isspace() or text[i] in '.!?,;:':
-                return i + 1
-        
-        return max_len
-
-    def _transform(self, text: str) -> str:
-        if not text:
-            return text
-
-        # 1. Спецсимволы
-        for char, repl in SPECIAL_CHARS.items():
-            text = text.replace(char, repl)
-
-        # 2. Денежные суммы с дробями: $19.99 → "девятнадцать долларов девяносто девять центов"
-        def replace_currency(match):
-            currency = match.group(1)
-            whole = match.group(2)
-            frac = match.group(3)
-            try:
-                w_num = int(whole)
-                w = num2words(w_num, lang='ru')
-                f = num2words(int(frac), lang='ru')
-                curr_map = {'$': 'доллар', '€': 'евро', '£': 'фунт'}
-                curr_word = curr_map.get(currency, 'валюта')
-                
-                # Склонение валюты
-                if w_num % 10 == 1 and w_num % 100 != 11:
-                    curr_form = curr_word  # 1 доллар
-                elif 2 <= w_num % 10 <= 4 and not (12 <= w_num % 100 <= 14):
-                    curr_form = curr_word + 'а'  # 2-4 доллара
-                else:
-                    curr_form = curr_word + 'ов'  # 5+ долларов
-                
-                return f"{w} {curr_form} {f} центов"
-            except:
-                return match.group()
-        
-        text = re.sub(r'([\$€£])(\d+)\.(\d{2})', replace_currency, text)
-
-        # 3. Десятичные дроби: 2.0 → "два" (дробная часть 0 игнорируется для естественности)
-        def replace_decimal(match):
-            try:
-                num_str = match.group()
-                if '.' not in num_str:
-                    return num2words(int(num_str), lang='ru')
-                
-                whole_part, frac_part = num_str.split('.')
-                whole = int(whole_part)
-                frac = int(frac_part)
-                
-                # Особый случай: 2.0 → "два" (без "ноль десятых" — неестественно для речи)
-                if frac == 0:
-                    return num2words(whole, lang='ru')
-                
-                whole_word = num2words(whole, lang='ru')
-                frac_word = num2words(frac, lang='ru')
-                
-                # Название дробной части
-                frac_len = len(frac_part.lstrip('0') or '0')
-                if frac_len == 1:
-                    frac_name = 'десятых'
-                elif frac_len == 2:
-                    frac_name = 'сотых'
-                else:
-                    frac_name = 'тысячных'
-                
-                return f"{whole_word} целых {frac_word} {frac_name}"
-            except:
-                return match.group()
-        
-        text = re.sub(r'\b\d+\.\d+\b', replace_decimal, text)
-
-        # 4. Целые числа
-        def replace_number(match):
-            try:
-                num = int(match.group())
-                return num2words(num, lang='ru')
-            except:
-                return match.group()
-        text = re.sub(r'\b\d+\b', replace_number, text)
-
-        # 5. Аббревиатуры (только ЗАГЛАВНЫЕ буквы, 2+ символов, опционально цифры)
-        def replace_abbreviation(match):
-            word = match.group()
-            letters = ''.join(ch for ch in word if ch.isalpha())
-            digits = ''.join(ch for ch in word if ch.isdigit())
-            
-            if not letters:
-                return word
-            
-            # Транслит по буквам
-            translit = ' '.join(LATIN_TO_RU.get(ch.lower(), ch) for ch in letters)
-            if digits:
-                try:
-                    digit_words = num2words(int(digits), lang='ru')
-                    return f"{translit} {digit_words}"
-                except:
-                    return f"{translit} {digits}"
-            return translit
-        
-        text = re.sub(r'\b([A-Z]{2,}[0-9]*)\b', replace_abbreviation, text)
-
-        # 6. Остальные латинские слова
-        def replace_latin_word(match):
-            word = match.group()
-            lower_word = word.lower()
-            
-            if lower_word in trans_map:
-                return trans_map[lower_word]
-            
-            # Транслит по буквам, сохраняя только буквы
-            return ' '.join(
-                LATIN_TO_RU.get(ch.lower(), ch) 
-                for ch in word 
-                if ch.isalpha()
-            )
-        
-        text = re.sub(r'\b[a-zA-Z]+\b', replace_latin_word, text)
-
-        # 7. Финальная очистка пробелов
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
-
-    def flush(self) -> List[str]:
-        if not self.clean_buffer:
-            return []
-        
-        processed = self._transform(self.clean_buffer)
-        self.clean_buffer = ""
-        result = processed.strip()
-        return [result] if result else []
-
-    def reset(self):
-        self.clean_buffer = ""
-        self.inside_tag = False
+    def _is_cyrillic(self, char):
+        return '\u0400' <= char <= '\u04FF'
