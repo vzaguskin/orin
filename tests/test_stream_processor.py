@@ -409,6 +409,56 @@ class TestTagHandling:
         assert "<" not in full_text
         assert ">" not in full_text
 
+    # tests/test_stream_processor.py — заменить тесты тегов:
+
+    def test_html_like_tags_ignored(self):
+        """Теги игнорируются, НО содержимое МЕЖДУ тегами сохраняется."""
+        processor = StreamTextProcessor(max_chunk_size=100)
+        text = "Привет <b>Иван</b> как <i>дела</i> сегодня"
+        
+        fragments = []
+        for ch in text:
+            fragments.extend(processor.feed(ch))
+        fragments.extend(processor.flush())
+        
+        full_text = " ".join(fragments).lower()
+        
+        # Содержимое тегов СОХРАНЕНО
+        assert "привет" in full_text
+        assert "иван" in full_text  # ← КРИТИЧЕСКИ ВАЖНО: Иван не потерян!
+        assert "как" in full_text
+        assert "дела" in full_text
+        assert "сегодня" in full_text
+        
+        # Теги удалены
+        assert "<" not in full_text
+        assert ">" not in full_text
+        assert "b" not in full_text.replace(" ", "")  # буквы тегов удалены
+        assert "i" not in full_text.replace(" ", "")
+
+
+    def test_closing_tags_ignored(self):
+        """Закрывающие теги </tag> полностью игнорируются."""
+        processor = StreamTextProcessor(max_chunk_size=100)
+        text = "Ответ </tool_call> пользователю"
+        
+        fragments = []
+        for ch in text:
+            fragments.extend(processor.feed(ch))
+        fragments.extend(processor.flush())
+        
+        full_text = " ".join(fragments).lower()
+        
+        # Тег полностью удалён (без артефактов "разделить на тхинк")
+        assert "меньше" not in full_text  # '<' не раскрыто
+        assert "разделить" not in full_text  # '/' не раскрыто
+        assert "больше" not in full_text    # '>' не раскрыто
+        assert "think" not in full_text.replace(" ", "")
+        assert "тхинк" not in full_text.replace(" ", "")
+        
+        # Полезный текст сохранён
+        assert "ответ" in full_text
+        assert "пользователю" in full_text  # ← КРИТИЧЕСКИ ВАЖНО: текст после тега не потерян!
 
 
 
