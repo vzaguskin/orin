@@ -72,7 +72,7 @@ def send_chat_request_queued(user_message: str, is_streaming=True):
         return
 
     # 👇 Создаём один процессор на весь ответ
-    processor = StreamTextProcessor(max_chunk_size=200)
+    processor = StreamTextProcessor(max_chunk_size=70)
     buff = ""
 
     for line in responses.iter_lines():
